@@ -5,8 +5,10 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpExchange;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 
 public class Main {
     public static void main(String[] args) throws IOException {
@@ -29,6 +31,9 @@ public class Main {
                 case "GET":
                     getHandler(exchange);
                     break;
+                case "POST":
+                    postHandler(exchange);
+                    break;
                 default:
                     defaultHandler(exchange);
                     break;
@@ -47,24 +52,62 @@ public class Main {
                 case 3:
                     String userJson = getUser(requestURI[2]);
                     if (userJson == null) {
-                        response = """
-                                {
-                                    "message": "No user with the provided ID"
-                                }
-                                """;
-                        statusCode = 404;
+                        sendFailureMessage("No user with the provided ID", 404, exchange);
+                        return;
                     } else {
                         response = userJson;
                     }
                     break;
                 default:
-                    response = """
+                    sendFailureMessage("No such endpoint", 404, exchange);
+                    return;
+            }
+
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(statusCode, response.getBytes().length);
+
+            OutputStream os = exchange.getResponseBody();
+            os.write(response.getBytes());
+            os.close();
+        }
+        private void postHandler(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String response = "";
+            int statusCode = 200;
+
+            InputStream is = exchange.getRequestBody();
+            String body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            System.out.println(body);
+            is.close();
+
+            if (!path.equals("/users")) {
+                sendFailureMessage("No such endpoint", 404, exchange);
+                return;
+            } else if (body == null || body.isBlank()) {
+                sendFailureMessage("Body cannot be empty", 400, exchange);
+                return;
+            } else {
+                StringBuilder sb = new StringBuilder();
+                int nameIndex = body.indexOf("\"name\":");
+                if (nameIndex == -1) {
+                    sendFailureMessage("No name provided", 400, exchange);
+                    return;
+                }
+                for (int i = nameIndex + 9; i < body.length(); i++) {
+                    if (body.charAt(i) == '\"') break;
+
+                    sb.append(body.charAt(i));
+                }
+                if (sb.toString().isBlank()) {
+                    sendFailureMessage("Name cannot be empty", 400, exchange);
+                    return;
+                }
+
+                response = String.format("""
                             {
-                                "message": "No such endpoint"
+                                "message": "User %s created successfully"
                             }
-                            """;
-                    statusCode = 404;
-                    break;
+                    """, sb.toString());
             }
 
             exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -77,12 +120,12 @@ public class Main {
         private void defaultHandler(HttpExchange exchange) throws IOException {
             String response = """
                     {
-                        "message": "The only supported method is GET"
+                        "message": "The only supported methods are GET and POST"
                     }
                     """;
 
             exchange.getResponseHeaders().set("Content-Type", "application/json");
-            exchange.getResponseHeaders().set("Allow", "GET");
+            exchange.getResponseHeaders().set("Allow", "GET, POST");
             exchange.sendResponseHeaders(405, response.getBytes().length);
 
             OutputStream os = exchange.getResponseBody();
@@ -110,6 +153,20 @@ public class Main {
             } else {
                 return null;
             }
+        }
+        private void sendFailureMessage(String message, int statusCode, HttpExchange exchange) throws IOException {
+            String response = String.format("""
+                    {
+                        "message": "%s"
+                    }
+                """, message);
+
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(404, response.getBytes().length);
+
+            OutputStream os = exchange.getResponseBody();
+            os.write(response.getBytes());
+            os.close();
         }
     }
 
