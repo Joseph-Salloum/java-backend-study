@@ -35,6 +35,12 @@ public class UsersHandler implements HttpHandler {
         String response = "";
         int statusCode = 200;
 
+        if (users.isEmpty()) {
+            response = "[]";
+            sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
+            return;
+        }
+
         if (requestPath.equals("/users")) {
             StringBuilder sb = new StringBuilder();
             for (User user : users) {
