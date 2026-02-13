@@ -5,14 +5,20 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
 public class UsersHandler implements HttpHandler {
-    private static List<User> users = new ArrayList<>();
-    private static int nextId = 0;
+    //Better performance on large-scale systems than compiling the regex each request
+    private static final Pattern USER_ID_PATTERN = Pattern.compile("/users/\\d+");
+
+    private static final List<User> users = Collections.synchronizedList(new ArrayList<>());
+    private static final AtomicInteger nextId = new AtomicInteger(1);
 
     @Override
     public void handle(HttpExchange exchange) throws IOException{
@@ -22,6 +28,12 @@ public class UsersHandler implements HttpHandler {
                 break;
             case "POST":
                 postHandler(exchange);
+                break;
+            case "PUT":
+                putHandler(exchange);
+                break;
+            case "DELETE":
+                deleteHandler(exchange);
                 break;
             default:
                 defaultHandler(exchange);
@@ -35,13 +47,13 @@ public class UsersHandler implements HttpHandler {
         String response = "";
         int statusCode = 200;
 
-        if (users.isEmpty()) {
-            response = "[]";
-            sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
-            return;
-        }
-
         if (requestPath.equals("/users")) {
+            if (users.isEmpty()) {
+                response = "[]";
+                sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
+                return;
+            }
+
             StringBuilder sb = new StringBuilder();
             for (User user : users) {
                 sb.append(user.toString());
@@ -56,46 +68,36 @@ public class UsersHandler implements HttpHandler {
                     """, sb.toString());
             sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
             return;
-        } else if (requestPath.matches("/users/[0-9a-zA-Z]+")) {
-            try {
-                int userId = Integer.parseInt(requestPath.split("/")[2]);
-                User foundUser = null;
-                for (User user : users) {
-                    if (user.id == userId) {
-                        foundUser = user;
-                        break;
-                    }
+        } else if (USER_ID_PATTERN.matcher(requestPath).matches()) {
+            int userId = Integer.parseInt(requestPath.split("/")[2]);
+            User foundUser = null;
+            for (User user : users) {
+                if (user.id == userId) {
+                    foundUser = user;
+                    break;
                 }
+            }
 
-                if (foundUser == null) {
-                    response = String.format("""
-                            {
-                                "message": "No user with the provided id: %d"
-                            }
-                            """, userId);
-                    statusCode = 404;
-                    sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
-                    return;
-                }
-
-                response = foundUser.toString();
-                sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
-            } catch (NumberFormatException e) {
+            if (foundUser == null) {
                 response = String.format("""
                         {
-                            "message": "%s is invalid, id must be an Integer"
+                            "message": "No user with the provided id: %d"
                         }
-                        """, requestPath.split("/")[2]);
-                statusCode = 400;
+                        """, userId);
+                statusCode = 404;
                 sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
+                return;
             }
+
+            response = foundUser.toString();
+            sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
         } else {
             response = """
                     {
                         "message": "Invalid request path"
                     }
                     """;
-            statusCode = 400;
+            statusCode = 404;
             sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
         }
     }
@@ -143,7 +145,7 @@ public class UsersHandler implements HttpHandler {
             return;
         }
 
-        User newUser = new User(nextId++, userName);
+        User newUser = new User(nextId.getAndIncrement(), userName);
         users.add(newUser);
 
         response = String.format("""
@@ -155,6 +157,94 @@ public class UsersHandler implements HttpHandler {
         sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
     }
     @SuppressWarnings("unchecked")
+    private void putHandler(HttpExchange exchange) throws IOException {
+        String requestPath = exchange.getRequestURI().getPath();
+        String response = "";
+        int statusCode = 200;
+
+        if (!USER_ID_PATTERN.matcher(requestPath).matches()) {
+            response = """
+                    {
+                        "message": "Invalid path"
+                    }
+                    """;
+            statusCode = 404;
+            sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
+            return;
+        }
+
+        InputStream is = exchange.getRequestBody();
+        String body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        is.close();
+        if (body.isBlank()) {
+            response = """
+                    {
+                        "message": "Request body cannot be blank"
+                    }
+                    """;
+            statusCode = 400;
+            sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
+            return;
+        }
+
+        int userId = Integer.parseInt(requestPath.split("/")[2]);
+        String newUserName = extractUserName(body);
+
+        if (newUserName == null || newUserName.isBlank()) {
+            response = """
+                    {
+                        "message": "Username cannot be empty"
+                    }
+                    """;
+            statusCode = 400;
+            sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
+            return;
+        }
+
+        User foundUser = null;
+
+        for (User u : users) if (u.id == userId) {foundUser = u; break;}
+
+        if (foundUser == null) {
+            response = """
+                    {
+                        "message": "No user with the provided id"
+                    }
+                    """;
+            statusCode = 404;
+            sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
+            return;
+        }
+
+        foundUser.name = newUserName;
+        response = foundUser.toString();
+        sendResponse(exchange, response, statusCode, new Pair<>("Content-Type", "application/json"));
+    }
+    @SuppressWarnings("unchecked")
+    private void deleteHandler(HttpExchange exchange) throws IOException {
+        String requestPath = exchange.getRequestURI().getPath();
+
+        if (!USER_ID_PATTERN.matcher(requestPath).matches()) {
+            String response = """
+                    {
+                        "message": "Invalid path"
+                    }
+                    """;
+            sendResponse(exchange, response, 404, new Pair<>("Content-Type", "application/json"));
+            return;
+        }
+
+        int userId = Integer.parseInt(requestPath.split("/")[2]);
+        
+        if (users.removeIf(user -> user.id == userId)) {
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        } else {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+    }
+    @SuppressWarnings("unchecked")
     private void defaultHandler(HttpExchange exchange) throws IOException {
         String response = """
                 {
@@ -164,7 +254,7 @@ public class UsersHandler implements HttpHandler {
         int statusCode = 405;
         sendResponse(exchange, response, statusCode,
             new Pair<>("Content-Type", "application/json"), 
-            new Pair<>("Allow", "GET, POST")
+            new Pair<>("Allow", "GET, POST, PUT, DELETE")
         );
     }
 
